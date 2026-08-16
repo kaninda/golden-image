@@ -21,5 +21,43 @@
             <version>10.1.47</version>
             <scope>provided</scope>
         </dependency>
+        <dependency>
+            <groupId>com.nimbusds</groupId>
+            <artifactId>nimbus-jose-jwt</artifactId>
+            <version>10.9.1</version>
+        </dependency>
     </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.1</version>
+
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+
+                        <configuration>
+                            <!--
+                                Remplace le JAR normal par un JAR contenant
+                                également les dépendances runtime de la Valve.
+                            -->
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+
+                            <!--
+                                Évite de générer un dependency-reduced-pom.xml.
+                                Pour notre module plateforme, on garde le POM simple.
+                            -->
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>

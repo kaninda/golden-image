@@ -14,32 +14,44 @@ The goal is to reproduce and progressively modernize an enterprise architecture 
 ## Architecture
 
 ```text
+Keycloak
+   │
+   │ OIDC / OAuth 2.0
+   ▼
+JWT Access Token
+   │
+   │ Authorization: Bearer <token>
+   ▼
 Official Tomcat Image
 tomcat:10.1-jdk21-temurin
-        │
-        ▼
+   │
+   ▼
 Golden Image
-company/tomcat-golden:1.2.0
-        │
-        ├── Java 21
-        ├── Tomcat 10.1
-        ├── Standardized Tomcat configuration
-        └── Security Valve
-                │
-                ├── Mock authentication
-                ├── Principal creation
-                └── Role propagation
-                        │
-                        ▼
+company/tomcat-golden:1.3.0
+   │
+   ├── Java 21
+   ├── Tomcat 10.1
+   ├── Standardized Tomcat configuration
+   └── Security Valve
+          │
+          ├── Bearer Token extraction
+          ├── Nimbus JOSE + JWT
+          ├── JWKS public-key retrieval
+          ├── RS256 signature validation
+          ├── issuer / audience / expiration validation
+          ├── Keycloak role extraction
+          └── GenericPrincipal creation
+                    │
+                    ▼
 Application Image
-golden-image-app:1.2.0
-        │
-        └── Spring Boot WAR
+golden-image-app:1.3.0
+   │
+   └── Spring Boot WAR
 ```
 
 The Golden Image is owned by the **platform layer**, while the WAR remains an independent application artifact.
 
-The application does not implement the authentication mechanism itself.
+The application does not implement the authentication mechanism itself and intentionally does **not** use Spring Security for this demonstration.
 
 ---
 
@@ -49,58 +61,59 @@ The custom Tomcat `SecurityValve` intercepts HTTP requests at the Tomcat `Host` 
 
 ```text
 HTTP Request
-      │
-      ▼
+   │
+   │ Authorization: Bearer <JWT>
+   ▼
 Tomcat Connector
-      │
-      ▼
+   │
+   ▼
 Engine
-      │
-      ▼
+   │
+   ▼
 Host
-      │
-      ▼
+   │
+   ▼
 SecurityValve
-      │
-      ├── Mock authentication
-      │
-      ├── GenericPrincipal
-      │       └── alice
-      │
-      └── Roles
-              ├── USER
-              └── ADMIN
-      │
-      ▼
+   │
+   ├── Extract Bearer Token
+   ├── Read JWT header (`kid`, `alg`)
+   ├── Resolve public key through JWKS
+   ├── Verify RS256 signature
+   ├── Validate `iss`, `aud`, `exp`
+   ├── Extract `preferred_username`
+   ├── Extract `realm_access.roles`
+   └── Create Tomcat `GenericPrincipal`
+   │
+   ▼
 Context
-      │
-      ▼
+   │
+   ▼
 Spring Boot WAR
-      │
-      ▼
+   │
+   ▼
 DispatcherServlet
-      │
-      ▼
+   │
+   ▼
 Controller
 ```
 
-The Valve executes before the request reaches the application.
+The Valve executes before the request reaches the application. A request without a Bearer Token, or with an invalid token, is rejected with `401 Unauthorized`.
 
-This demonstrates how platform-level security concerns can be implemented at the Tomcat container level without coupling authentication logic to the Spring Boot application.
+This keeps authentication and JWT validation at the platform layer while preserving a standard Servlet identity contract for the WAR.
 
 ---
 
 ## Container-Managed Identity
 
-Version `1.2.0` introduces a container-managed identity demonstration.
+Version `1.3.0` replaces the previous Keycloak identity with a real identity issued by Keycloak.
 
-The Security Valve currently performs **mock authentication** by creating a Tomcat `GenericPrincipal`:
+A valid Keycloak access token contains the identity and realm roles used by the platform:
 
 ```text
-User
+preferred_username
 └── alice
 
-Roles
+realm_access.roles
 ├── USER
 └── ADMIN
 ```
@@ -108,28 +121,29 @@ Roles
 Conceptually:
 
 ```text
+Keycloak
+   ↓
+JWT Access Token
+   ↓
 SecurityValve
-      │
-      ▼
-Mock Authentication
-      │
-      ▼
+   ↓
+Nimbus JWT validation
+   ↓
+Keycloak claims
+   ↓
 GenericPrincipal
-      │
-      ├── alice
-      ├── USER
-      └── ADMIN
-      │
-      ▼
+   ├── alice
+   ├── USER
+   └── ADMIN
+   ↓
 Tomcat Request
-      │
-      ▼
+   ↓
 Spring Boot WAR
 ```
 
-The identity is attached to the Tomcat request before processing continues toward the application.
+The identity is attached to the Tomcat request only after the JWT has been successfully validated.
 
-The WAR therefore receives a request that already contains the authenticated identity.
+The WAR therefore receives a request that already contains the authenticated identity and roles.
 
 ---
 
@@ -158,7 +172,7 @@ request.isUserInRole("USER");
 request.isUserInRole("ADMIN");
 ```
 
-For the current mock identity:
+For the current Keycloak identity:
 
 ```text
 Principal
@@ -197,46 +211,27 @@ Application
 
 ## Why This Matters
 
-This architecture demonstrates an important enterprise pattern:
+This architecture demonstrates an enterprise Platform Engineering pattern in which the application depends on an **identity contract**, rather than directly on a specific authentication implementation.
 
 ```text
-Authentication mechanism
-        │
-        ▼
-Platform Runtime
-        │
-        ▼
-Principal
-        │
-        ▼
-Application
+Keycloak / OIDC / OAuth 2.0
+          │
+          ▼
+      JWT Access Token
+          │
+          ▼
+   Platform Runtime
+          │
+          ▼
+  Tomcat Principal
+          │
+          ▼
+     Application
 ```
 
-The application depends on the **identity contract**, not directly on the authentication technology.
+The previous milestone used a mock `GenericPrincipal`. Version `1.3.0` preserves the same application-facing contract while replacing the mock with standards-based authentication.
 
-Today:
-
-```text
-Mock Authentication
-        ↓
-GenericPrincipal
-```
-
-A future version will replace the mock authentication with:
-
-```text
-Keycloak
-   ↓
-OIDC / OAuth2
-   ↓
-JWT Access Token
-   ↓
-SecurityValve
-   ↓
-GenericPrincipal
-```
-
-while keeping the WAR largely independent from the authentication implementation.
+The WAR remains largely independent from Keycloak: it consumes `Principal`, `getRemoteUser()` and container-managed roles through the Servlet API.
 
 ---
 
@@ -330,7 +325,7 @@ It provides:
 The runtime image is built as:
 
 ```text
-company/tomcat-golden:1.2.0
+company/tomcat-golden:1.3.0
 ```
 
 ---
@@ -348,11 +343,17 @@ ValveBase
 The current implementation:
 
 * intercepts HTTP requests;
-* performs mock authentication;
+* extracts the `Authorization: Bearer <JWT>` header;
+* validates Keycloak JWT access tokens using **Nimbus JOSE + JWT**;
+* resolves Keycloak public keys from its **JWKS** endpoint;
+* selects the correct public key using the JWT `kid`;
+* accepts `RS256` signed tokens;
+* validates the token signature, issuer, audience and expiration;
+* extracts `preferred_username`;
+* extracts Keycloak realm roles from `realm_access.roles`;
 * creates a Tomcat `GenericPrincipal`;
-* associates the roles `USER` and `ADMIN`;
 * attaches the Principal to the request;
-* adds an `X-Security-Valve` HTTP response header;
+* adds an `X-Security-Valve` response header;
 * forwards the request to the next component in the Tomcat pipeline.
 
 The important continuation operation remains:
@@ -361,25 +362,17 @@ The important continuation operation remains:
 getNext().invoke(request, response);
 ```
 
-which continues request processing through the Tomcat pipeline.
+The Valve uses **Nimbus JOSE + JWT** rather than implementing JWT parsing or cryptographic verification manually.
 
-The module produces:
+Because the Valve is loaded from Tomcat's shared classloader, the module is packaged as a **shaded / fat JAR** so that Nimbus and its runtime dependencies are available alongside the Valve. Tomcat and Jakarta APIs remain `provided` dependencies and are supplied by the runtime.
 
-```text
-security-valve-0.0.1-SNAPSHOT.jar
-```
-
-The JAR is installed in the Tomcat shared library directory:
+The JAR is installed in:
 
 ```text
 /usr/local/tomcat/lib/
 ```
 
-This makes the Valve part of the Tomcat platform rather than part of an individual WAR.
-
-The Valve is configured at the Tomcat `Host` level in `server.xml`.
-
-As a result, it can intercept requests before applications deployed on that Host.
+This makes authentication a platform concern rather than part of an individual WAR.
 
 ---
 
@@ -396,18 +389,18 @@ app-0.0.1-SNAPSHOT.war
 The application image inherits from the Golden Image:
 
 ```dockerfile
-FROM company/tomcat-golden:1.2.0
+FROM company/tomcat-golden:1.3.0
 ```
 
 and only adds the WAR:
 
 ```text
-company/tomcat-golden:1.2.0
+company/tomcat-golden:1.3.0
         +
 Spring Boot WAR
         │
         ▼
-golden-image-app:1.2.0
+golden-image-app:1.3.0
 ```
 
 This keeps the platform lifecycle separated from the application lifecycle.
@@ -439,7 +432,7 @@ The Docker build context must be the project root because the runtime image incl
 ```bash
 docker build \
   -f runtime/Dockerfile \
-  -t company/tomcat-golden:1.2.0 \
+  -t company/tomcat-golden:1.3.0 \
   .
 ```
 
@@ -460,7 +453,7 @@ security-valve.jar
 ```bash
 docker build \
   -f app/Dockerfile \
-  -t golden-image-app:1.2.0 \
+  -t golden-image-app:1.3.0 \
   .
 ```
 
@@ -476,7 +469,7 @@ Run the application:
 docker run \
   --name golden-tomcat-demo \
   -p 8081:8080 \
-  golden-image-app:1.2.0
+  golden-image-app:1.3.0
 ```
 
 The request flow is:
@@ -506,30 +499,26 @@ Spring Boot
 
 ---
 
-## Verify the Security Valve
+## Verify Keycloak Authentication
 
-### Verify Request Interception
-
-Call:
-
-```bash
-curl -i http://localhost:8081/golden-image/hello
-```
-
-The HTTP response contains:
-
-```text
-X-Security-Valve: active
-```
-
-This proves that the request passed through the platform-level Valve before reaching the Spring Boot application.
-
-### Verify Container-Managed Identity
-
-Call:
+### Request Without a Bearer Token
 
 ```bash
 curl -i http://localhost:8081/golden-image/whoami
+```
+
+Expected result:
+
+```text
+HTTP/1.1 401
+```
+
+### Request With a Valid Keycloak Access Token
+
+```bash
+curl -i \
+  -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8081/golden-image/whoami
 ```
 
 Expected response:
@@ -543,19 +532,27 @@ Expected response:
 }
 ```
 
-This proves the complete identity propagation flow:
+This proves the complete authentication and identity propagation flow:
 
 ```text
+Keycloak
+   ↓
+Access Token JWT
+   ↓
 SecurityValve
-      ↓
+   ↓
+JWKS + signature / claims validation
+   ↓
 GenericPrincipal
-      ↓
+   ↓
 Tomcat Request
-      ↓
+   ↓
 Spring Boot WAR
-      ↓
+   ↓
 HttpServletRequest
 ```
+
+For the current Docker Desktop lab, Keycloak is published on the host at `localhost:8080` while Tomcat runs in a separate container. The Valve therefore reaches the JWKS endpoint through `host.docker.internal:8080`; the token issuer remains the Keycloak issuer exposed as `http://localhost:8080/realms/tomcat-platform`.
 
 ---
 
@@ -642,32 +639,35 @@ The Golden Image follows semantic versioning:
 MAJOR.MINOR.PATCH
 ```
 
-The project currently demonstrates three architectural milestones:
+The project currently demonstrates four architectural milestones:
 
 ```text
 1.0.0
-  │
   └── Baseline Golden Image
-        │
-        ▼
+        ↓
 1.1.0
-  │
   └── Platform-level Security Valve
-        │
-        ▼
+        ↓
 1.2.0
-  │
-  └── Container-managed identity
+  └── Container-managed Keycloak identity
         ├── GenericPrincipal
         └── Roles
+        ↓
+1.3.0
+  └── Keycloak + OIDC/JWT
+        ├── Bearer Token
+        ├── Nimbus JOSE + JWT
+        ├── JWKS
+        ├── JWT validation
+        └── Keycloak identity → Principal
 ```
 
 Git releases and Golden Image versions can be aligned:
 
 ```text
-Git tag 1.2.0
+Git tag 1.3.0
         ↕
-company/tomcat-golden:1.2.0
+company/tomcat-golden:1.3.0
 ```
 
 Application versions remain conceptually independent from runtime versions.
@@ -676,15 +676,15 @@ Application versions remain conceptually independent from runtime versions.
 
 ## Roadmap
 
-The current implementation deliberately uses a mock identity to demonstrate the contract between Tomcat and the deployed WAR.
+The Keycloak / OIDC / JWT integration is now functional.
 
-The next architectural milestone is:
+Current flow:
 
 ```text
 Keycloak
     │
     ▼
-OIDC / OAuth2
+OIDC / OAuth 2.0
     │
     ▼
 JWT Access Token
@@ -693,11 +693,12 @@ JWT Access Token
 SecurityValve
     │
     ├── Bearer Token extraction
-    ├── JWT validation
-    ├── signature verification
+    ├── JWKS key resolution
+    ├── RS256 signature verification
     ├── issuer validation
     ├── audience validation
     ├── expiration validation
+    ├── username extraction
     └── role extraction
             │
             ▼
@@ -707,7 +708,14 @@ GenericPrincipal
 Spring Boot WAR
 ```
 
-The objective is to replace mock authentication while preserving the same application-facing identity contract.
+The next hardening milestone is to industrialize the platform component:
+
+* externalize `issuer`, `audience` and JWKS configuration;
+* construct and reuse the Nimbus `JWTProcessor` rather than rebuilding it per request;
+* separate Tomcat request orchestration from JWT validation;
+* add automated positive and negative authentication tests;
+* run Keycloak and the Golden Image on a shared Docker network;
+* later deploy the architecture on Kubernetes.
 
 ---
 
@@ -715,7 +723,7 @@ The objective is to replace mock authentication while preserving the same applic
 
 This project reproduces an enterprise Platform Engineering pattern where a platform team provides standardized and secured application runtimes while development teams remain responsible for their application artifacts.
 
-The architecture currently demonstrates:
+The architecture now demonstrates:
 
 ```text
 Platform Team
@@ -724,23 +732,32 @@ Platform Team
      ├── Tomcat runtime
      ├── Tomcat configuration
      ├── Security Valve
+     ├── OIDC/JWT validation
      └── Container-managed identity
               │
               ▼
-        Golden Image
+         Golden Image
               │
               ▼
 Application Team
      │
      └── Spring Boot WAR
               │
-              └── consumes Principal
+              └── consumes Principal and roles
 ```
 
-Release `1.2.0` extends the platform-level Security Valve with a mock authenticated identity and Tomcat-managed roles.
+Release `1.3.0` replaces the OIDC/JWT authentication milestone with real standards-based authentication using **Keycloak, OpenID Connect, OAuth 2.0, JWT access tokens, JWKS and Nimbus JOSE + JWT**.
 
-The Spring Boot WAR remains independent from the authentication implementation and consumes the identity through the standard Servlet API.
+The Spring Boot WAR remains independent from the authentication implementation and consumes the authenticated identity through the standard Servlet API.
 
-No external Identity Provider is integrated yet.
+The resulting target flow is now operational:
 
-The next release will replace the mock identity with standards-based authentication using **Keycloak, OpenID Connect, OAuth 2.0 and JWT access tokens**.
+```text
+JWT Keycloak
+    ↓
+Tomcat Security Valve
+    ↓
+Principal
+    ↓
+Spring Boot WAR
+```
