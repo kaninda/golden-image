@@ -1,3 +1,4 @@
-FROM company/tomcat-golden:0.1.1
+FROM company/tomcat-golden:1.1.0
 
-COPY target/golden-image-0.0.1-SNAPSHOT.war /usr/local/tomcat/webapps/golden-image.war
+COPY app/target/app-0.0.1-SNAPSHOT.war /usr/local/tomcat/webapps/golden-image.war
+
